@@ -49,23 +49,40 @@ async function natsRequest(subject, requestData, encodeJson = true) {
 }
 
 async function cleanupSocket(connectionId) {
-  console.log(`cleaning up socket ${connectionId}`);
+  console.log(`cleaning up socket ${connectionId}, connections: ${Object.keys(connections)}`);
+  if (!connections[connectionId]) {
+    console.log(`connection ${connectionId} not found`);
+    return;
+  }
   connections[connectionId].socket.removeAllListeners('close');
   connections[connectionId].socket.destroy();
   delete connections[connectionId];
+  console.log(`cleaned up socket ${connectionId}, remaining: ${Object.keys(connections)}`);
 }
 
 async function setupConnection(connectionId, input) {
   const connection = connections[connectionId];
 
+  console.log(`setting up socket ${connectionId}, connections: ${Object.keys(connections)}`);
+
   const directionKey = input ? 'output' : 'input';
 
   connection.socket.on('data', async (data) => {
-    await natsRequest(`broker-proxy.sockets.${connectionId}.${directionKey}.data`, data, false);
+    try {
+      await natsRequest(`broker-proxy.sockets.${connectionId}.${directionKey}.data`, data, false);
+    } catch (e) {
+      console.log('connection error', e);
+      await cleanupSocket(connectionId);
+    }
   });
 
   connection.onReceive = (data) => new Promise((resolve, reject) => {
-    connection.socket.write(data, resolve);
+    try {
+      connection.socket.write(data, resolve);
+    } catch (e) {
+      console.log('connection error');
+      return cleanupSocket(connectionId);
+    }
   });
 
   connection.close = cleanupSocket.bind(undefined, connectionId);
@@ -73,6 +90,8 @@ async function setupConnection(connectionId, input) {
     connection.close();
     natsRequest(`broker-proxy.sockets.${connectionId}.${directionKey}.close`, {}, true);
   });
+
+  console.log(`set up socket ${connectionId}, connections: ${Object.keys(connections)}`);
 }
 
 async function subscribeDataSubjects(input) {
@@ -108,9 +127,15 @@ if (args.input) {
       deny();
       return;
     }
+    const socket = accept(true);
+    if (!socket) {
+      console.log(`error setting up socket ${socketId}`);
+      return;
+    }
     connections[socketId] = {
-      socket: accept(true)
+      socket
     };
+    socket.on('error', console.log.bind(undefined, `Error with connection ${socketId}`));
 
     await setupConnection(socketId, true);
   });
@@ -119,6 +144,8 @@ if (args.input) {
   server.useAuth(socks.auth.None());
 
   await subscribeDataSubjects(true);
+
+  console.log('waiting for incoming connections...');
 }
 
 if (args.output) {
@@ -134,9 +161,12 @@ if (args.output) {
 
         resolve({ socketId });
       });
-      socket.on('error', reject);
+
+      socket.on('error', console.log.bind(undefined, `Error with connection ${socket.id}`));
     });
   });
 
   await subscribeDataSubjects(false);
+
+  console.log('waiting for outgoing connections...');
 }
